@@ -12,6 +12,7 @@ import tempfile
 # Constants
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 LLM_MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+TRAINED_EMBEDDING_PATH = "trained_models/embedding"
 
 # Initialize session state
 if 'faiss_index' not in st.session_state:
@@ -51,9 +52,15 @@ def chunk_text(text, chunk_size=1000, chunk_overlap=200):
     return text_splitter.split_text(text)
 
 def process_pdf(pdf_file):
-    # Save uploaded file temporarily
+    # Handle both file objects and bytes
+    if hasattr(pdf_file, 'getvalue'):
+        pdf_content = pdf_file.getvalue()
+    else:
+        pdf_content = pdf_file
+
+    # Save content temporarily
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-        tmp_file.write(pdf_file.getvalue())
+        tmp_file.write(pdf_content)
         tmp_path = tmp_file.name
 
     # Process the PDF
@@ -75,7 +82,14 @@ def create_faiss_index(text_chunks, embedding_model_name):
         return None, None
 
     try:
-        embedding_model = SentenceTransformer(embedding_model_name)
+        # Try to load trained model first
+        if os.path.exists(TRAINED_EMBEDDING_PATH):
+            embedding_model = SentenceTransformer(TRAINED_EMBEDDING_PATH)
+            st.info("Using fine-tuned embedding model")
+        else:
+            embedding_model = SentenceTransformer(embedding_model_name)
+            st.info("Using base embedding model")
+            
         embeddings = embedding_model.encode(text_chunks, show_progress_bar=True)
         
         dimension = embeddings.shape[1]
@@ -125,12 +139,32 @@ if uploaded_file is not None:
 # Initialize the pipeline if not already done
 if st.session_state.pipe is None:
     with st.spinner("Loading language model..."):
-        st.session_state.pipe = pipeline(
-            "text-generation",
-            model=LLM_MODEL_NAME,
-            torch_dtype=torch.bfloat16,
-            device_map="auto"
-        )
+        try:
+            # Load tokenizer first
+            tokenizer = AutoTokenizer.from_pretrained(
+                LLM_MODEL_NAME,
+                trust_remote_code=True
+            )
+            
+            # Load model with specific configuration
+            model = AutoModelForCausalLM.from_pretrained(
+                LLM_MODEL_NAME,
+                trust_remote_code=True,
+                device_map="auto",
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+            )
+            
+            # Create pipeline with loaded components
+            st.session_state.pipe = pipeline(
+                task="text-generation",
+                model=model,
+                tokenizer=tokenizer,
+                trust_remote_code=True
+            )
+            st.info("Using TinyLlama model")
+        except Exception as e:
+            st.error(f"Error loading language model: {e}")
+            st.session_state.pipe = None
 
 # Question input
 question = st.text_input("Ask a question about the PDF content:")
@@ -161,14 +195,15 @@ if question and st.session_state.faiss_index is not None:
             add_generation_prompt=True
         )
 
-        # Generate answer
+        # Generate answer with simplified parameters
         outputs = st.session_state.pipe(
             prompt,
-            max_new_tokens=256,
+            max_new_tokens=512,
             do_sample=True,
             temperature=0.7,
             top_k=50,
-            top_p=0.95
+            top_p=0.95,
+            repetition_penalty=1.2
         )
 
         # Extract and display only the answer

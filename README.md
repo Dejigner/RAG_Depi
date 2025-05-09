@@ -63,4 +63,4 @@ To deploy your own version:
 - `app.py`: Main Streamlit application
 - `requirements.txt`: Project dependencies
 - `packages.txt`: System dependencies
-- `README.md`: Project documentation 
+- `README.md`: Project documentation
